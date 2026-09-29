@@ -333,7 +333,7 @@ def start_process(
     directory = job_dir(job_id)
     state = read_json(directory / "state.json")
 
-    if state.get("status") == "processing":
+    if state.get("status") in {"queued", "processing"}:
         return state
 
     if mode not in {"fast", "smooth"}:

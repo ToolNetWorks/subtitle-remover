@@ -936,8 +936,10 @@
 
         fetch(API_BASE + `/api/jobs/${state.jobId}/preview`, { method: "POST", body: buildFormData() })
           .then(async r => {
-            const data = await r.json().catch(() => ({}));
-            if (!r.ok) throw new Error(data.detail || "Preview lỗi");
+            if (!r.ok) {
+              const data = await r.json().catch(() => ({}));
+              throw new Error(data.detail || "Preview lỗi");
+            }
             return r.blob();
           })
           .then(blob => {
