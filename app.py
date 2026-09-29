@@ -364,7 +364,7 @@ def create_preview(
         raise HTTPException(500, "Không đọc được preview frame")
 
     try:
-        cleaned = remove_strip(
+        cleaned, _ = remove_strip(
             frame,
             x1=x1,
             x2=x2,
@@ -410,6 +410,8 @@ def start_process(
         raise HTTPException(400, "Thickness không hợp lệ")
     if feather < 0 or feather > 100:
         raise HTTPException(400, "Feather không hợp lệ")
+    if mask_strength < 0 or mask_strength > 100:
+        raise HTTPException(400, "Mask strength không hợp lệ")
 
     output = directory / "output.mp4"
     output.unlink(missing_ok=True)
@@ -426,6 +428,7 @@ def start_process(
             "feather": feather,
             "sample_gap": sample_gap,
             "mode": mode,
+            "mask_strength": mask_strength,
         },
     })
 

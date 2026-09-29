@@ -5,7 +5,7 @@ from typing import Optional
 import cv2
 import numpy as np
 
-from .smart_mask import SmartMaskError, build_subtitle_mask
+from .smart_mask import SmartMaskError, SmartMaskResult, build_subtitle_mask
 
 
 class SmartInpaintError(RuntimeError):
@@ -22,7 +22,7 @@ def smart_remove(
     mask_strength: int = 50,
     outline_px: int = 2,
     inpaint_radius: int = 3,
-) -> np.ndarray:
+) -> tuple[np.ndarray, SmartMaskResult]:
     if frame is None or frame.size == 0:
         raise SmartInpaintError("Empty frame")
 
@@ -34,23 +34,33 @@ def smart_remove(
 
     roi = frame[top:bottom, left:right]
     if roi.size == 0:
-        return frame
+        mask_result = SmartMaskResult(
+            mask=np.zeros((bottom - top, right - left), dtype=np.uint8),
+            had_mask=False,
+            reliable=True,
+            coverage=0.0,
+            stats={"frames_with_mask": 0, "frames_without_mask": 1, "unreliable_frames": 0},
+        )
+        return frame, mask_result
 
     try:
-        mask = build_subtitle_mask(
+        mask_result = build_subtitle_mask(
             roi, strength=mask_strength, outline_px=outline_px
         )
     except SmartMaskError:
-        return frame
+        empty_mask = np.zeros(roi.shape[:2], dtype=np.uint8)
+        mask_result = SmartMaskResult(
+            mask=empty_mask,
+            had_mask=False,
+            reliable=False,
+            coverage=0.0,
+            stats={"frames_with_mask": 0, "frames_without_mask": 0, "unreliable_frames": 1},
+        )
+        return frame, mask_result
 
+    mask = mask_result.mask
     if mask is None or mask.sum() == 0:
-        return frame
-
-    mask_coverage = float(np.count_nonzero(mask)) / float(
-        mask.shape[0] * mask.shape[1]
-    )
-    if mask_coverage > 0.40:
-        return frame
+        return frame, mask_result
 
     inpaint_radius = max(1, min(int(inpaint_radius), 5))
     try:
@@ -58,8 +68,8 @@ def smart_remove(
             roi, mask, inpaint_radius, cv2.INPAINT_TELEA
         )
     except cv2.error:
-        return frame
+        return frame, mask_result
 
     result = frame.copy()
     result[top:bottom, left:right] = inpainted
-    return result
+    return result, mask_result

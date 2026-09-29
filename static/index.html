@@ -1116,8 +1116,13 @@
       $("feather").value = 8;
       $("thicknessValue").textContent = "48 px";
       $("featherValue").textContent = "8 px";
-      $("mode").value = "smooth";
+      $("mode").value = "smart";
+      if ($("maskStrength")) {
+        $("maskStrength").value = 50;
+        $("maskStrengthValue").textContent = "50";
+      }
       showError("");
+      updateModeUI();
       setStage("upload");
     }
 

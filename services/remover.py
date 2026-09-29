@@ -146,7 +146,7 @@ def remove_strip(
     sample_gap: int = 4,
     mode: str = "smooth",
     mask_strength: int = 50,
-) -> np.ndarray:
+) -> tuple[np.ndarray, Optional[SmartMaskResult]]:
     if frame is None or frame.size == 0:
         raise RemoveError("Empty video frame")
     if mode not in {"fast", "smooth", "smart"}:
@@ -170,7 +170,7 @@ def remove_strip(
             right=right,
             bottom=bottom,
             sample_gap=max(1, int(sample_gap)),
-        )
+        ), None
 
     if mode == "smooth":
         return _smooth_fill(
@@ -181,7 +181,7 @@ def remove_strip(
             bottom=bottom,
             sample_gap=max(1, int(sample_gap)),
             feather=max(0, int(feather)),
-        )
+        ), None
 
     return smart_remove(
         frame,
@@ -241,6 +241,15 @@ def process_video(
     started = time.time()
     processed = 0
     last_report = 0.0
+    smart_stats = {
+        "frames_with_mask": 0,
+        "frames_without_mask": 0,
+        "unreliable_frames": 0,
+        "total_mask_pixels": 0,
+        "average_mask_coverage": 0.0,
+        "max_mask_coverage": 0.0,
+    }
+    mask_coverages = []
 
     try:
         while True:
@@ -248,7 +257,7 @@ def process_video(
             if not ok:
                 break
 
-            cleaned = remove_strip(
+            cleaned, mask_result = remove_strip(
                 frame,
                 x1=x1,
                 x2=x2,
@@ -259,6 +268,17 @@ def process_video(
                 mode=mode,
                 mask_strength=mask_strength,
             )
+
+            if mask_result is not None:
+                smart_stats["frames_with_mask"] += mask_result.stats.get("frames_with_mask", 0)
+                smart_stats["frames_without_mask"] += mask_result.stats.get("frames_without_mask", 0)
+                smart_stats["unreliable_frames"] += mask_result.stats.get("unreliable_frames", 0)
+                if mask_result.had_mask:
+                    smart_stats["total_mask_pixels"] += int(mask_result.mask.sum())
+                    mask_coverages.append(mask_result.coverage)
+                    if mask_result.coverage > smart_stats["max_mask_coverage"]:
+                        smart_stats["max_mask_coverage"] = mask_result.coverage
+
             writer.write(cleaned)
             processed += 1
 
@@ -295,6 +315,9 @@ def process_video(
     if processed <= 0:
         raise RemoveError("No frames were processed")
 
+    if mask_coverages:
+        smart_stats["average_mask_coverage"] = round(float(np.mean(mask_coverages)), 4)
+
     progress_callback({
         "status": "processing",
         "progress": 97.0,
@@ -310,7 +333,7 @@ def process_video(
     )
 
     elapsed = max(0.0, time.time() - started)
-    return {
+    result = {
         "processed_frames": processed,
         "total_frames": total_frames,
         "elapsed_seconds": round(elapsed, 1),
@@ -319,3 +342,6 @@ def process_video(
         "fps": fps,
         "duration": meta["duration"],
     }
+    if mode == "smart":
+        result["smart_stats"] = smart_stats
+    return result
