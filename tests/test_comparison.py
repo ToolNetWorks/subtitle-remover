@@ -48,11 +48,34 @@ def _moving_gradient_frame(h, w, frame_idx, total_frames):
     return frame
 
 
-def _create_subtitle_mask(text_shape, x, y, font, font_scale, thickness, outline_px):
+def _bright_frame(h, w):
+    frame = np.full((h, w, 3), 220, dtype=np.uint8)
+    return frame
+
+
+def _create_subtitle_mask(text_shape, text, x, y, font, font_scale, thickness, outline_px):
     mask = np.zeros(text_shape[:2], dtype=np.uint8)
     if outline_px > 0:
-        cv2.putText(mask, "X", (x, y), font, font_scale, 255, thickness + outline_px * 2, cv2.LINE_AA)
-    cv2.putText(mask, "X", (x, y), font, font_scale, 255, thickness, cv2.LINE_AA)
+        cv2.putText(
+            mask,
+            text,
+            (x, y),
+            font,
+            font_scale,
+            255,
+            thickness + outline_px * 2,
+            cv2.LINE_AA,
+        )
+    cv2.putText(
+        mask,
+        text,
+        (x, y),
+        font,
+        font_scale,
+        255,
+        thickness,
+        cv2.LINE_AA,
+    )
     return mask
 
 
@@ -63,7 +86,7 @@ def create_test_video():
 
     width, height = 640, 360
     fps = 30
-    duration = 9  # 3 scenes x 3 seconds each
+    duration = 15  # 5 scenes x 3 seconds each
     total_frames = fps * duration
 
     font = cv2.FONT_HERSHEY_SIMPLEX
@@ -75,23 +98,37 @@ def create_test_video():
     clean_frames = []
     subtitle_frames = []
     subtitle_masks = []
+    scene_names = []
 
+    # Scene A: gradient + white/black-outline subtitle
+    # Scene B: noise + white subtitle
+    # Scene C: edge object + subtitle
+    # Scene D: moving gradient
+    # Scene E: bright background + dark subtitle
     scenes = [
-        (0, 3 * fps, "gradient", _gradient_frame(height, width)),
-        (3 * fps, 6 * fps, "noise", _noise_frame(height, width)),
-        (6 * fps, 9 * fps, "moving", None),
+        (0, 3 * fps, "gradient", _gradient_frame(height, width), "First subtitle", (255, 255, 255), 2),
+        (3 * fps, 6 * fps, "noise", _noise_frame(height, width), "Second line test", (255, 255, 255), 0),
+        (6 * fps, 9 * fps, "moving", None, "Final subtitle 123", (255, 255, 255), 2),
+        (9 * fps, 12 * fps, "bright", _bright_frame(height, width), "Dark subtitle here", (20, 20, 20), 0),
+        (12 * fps, 15 * fps, "gradient", _gradient_frame(height, width), "Yellow text test", (0, 255, 255), 2),
     ]
 
     for i in range(total_frames):
         scene_frame = None
         scene_name = "gradient"
-        for start, end, name, base in scenes:
+        text = "Test"
+        text_color = (255, 255, 255)
+        outline_px = 2
+        for start, end, name, base, t, color, opx in scenes:
             if start <= i < end:
                 scene_name = name
                 if name == "moving":
                     scene_frame = _moving_gradient_frame(height, width, i - start, 3 * fps)
                 else:
                     scene_frame = base.copy()
+                text = t
+                text_color = color
+                outline_px = opx
                 break
 
         if scene_frame is None:
@@ -100,34 +137,43 @@ def create_test_video():
         clean_frame = scene_frame.copy()
         subtitle_frame = scene_frame.copy()
 
-        if i < 3 * fps:
-            text = "First subtitle"
-            outline_px = 2
-        elif i < 6 * fps:
-            text = "Second line test"
-            outline_px = 3
-        else:
-            text = "Final subtitle 123"
-            outline_px = 2
-
+        if outline_px > 0:
+            cv2.putText(
+                subtitle_frame,
+                text,
+                (subtitle_x, subtitle_y + 28),
+                font,
+                font_scale,
+                (0, 0, 0),
+                thickness + outline_px * 2,
+                cv2.LINE_AA,
+            )
         cv2.putText(
             subtitle_frame,
             text,
             (subtitle_x, subtitle_y + 28),
             font,
             font_scale,
-            (255, 255, 255),
+            text_color,
             thickness,
             cv2.LINE_AA,
         )
 
         text_mask = _create_subtitle_mask(
-            (height, width), subtitle_x, subtitle_y + 28, font, font_scale, thickness, outline_px
+            (height, width),
+            text,
+            subtitle_x,
+            subtitle_y + 28,
+            font,
+            font_scale,
+            thickness,
+            outline_px,
         )
 
         clean_frames.append(clean_frame)
         subtitle_frames.append(subtitle_frame)
         subtitle_masks.append(text_mask)
+        scene_names.append(scene_name)
 
     subtitle_video = "/tmp/subtitle-burned.mp4"
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
@@ -140,7 +186,7 @@ def create_test_video():
         "ffmpeg", "-y",
         "-i", subtitle_video,
         "-f", "lavfi",
-        "-i", "sine=frequency=1000:duration=9",
+        "-i", "sine=frequency=1000:duration=15",
         "-c:v", "libx264",
         "-c:a", "aac",
         "-shortest",
@@ -154,12 +200,13 @@ def create_test_video():
 
     np.save("/tmp/clean-frames.npy", np.array(clean_frames))
     np.save("/tmp/subtitle-masks.npy", np.array(subtitle_masks))
+    np.save("/tmp/scene-names.npy", np.array(scene_names))
     print(f"Test video created: {TEST_VIDEO}")
     print(f"  Resolution: {width}x{height}")
     print(f"  FPS: {fps}")
     print(f"  Duration: {duration}s")
-    print(f"  Scenes: gradient, noise, moving")
-    return clean_frames, subtitle_masks
+    print(f"  Scenes: gradient, noise, moving, bright, yellow")
+    return clean_frames, subtitle_masks, scene_names
 
 
 def wait_for_status(job_id, expected_statuses, timeout=120):
@@ -177,11 +224,9 @@ def wait_for_status(job_id, expected_statuses, timeout=120):
 def process_video(mode, mask_strength=50):
     session = requests.Session()
 
-    upload_start = time.time()
     with open(TEST_VIDEO, "rb") as f:
         files = {"video": ("test.mp4", f, "video/mp4")}
         r = session.post(f"{BASE_URL}/api/jobs", files=files)
-    upload_elapsed = time.time() - upload_start
     assert r.status_code == 200
     job = r.json()
     job_id = job["job_id"]
@@ -217,7 +262,7 @@ def process_video(mode, mask_strength=50):
         for chunk in r.iter_content(chunk_size=1024 * 1024):
             f.write(chunk)
 
-    return result_path, processing_elapsed, upload_elapsed
+    return result_path, processing_elapsed
 
 
 def calculate_psnr(img1, img2):
@@ -225,6 +270,30 @@ def calculate_psnr(img1, img2):
     if mse == 0:
         return float("inf")
     return 20 * np.log10(255.0 / np.sqrt(mse))
+
+
+def calculate_mask_metrics(pred_mask, gt_mask):
+    pred_mask = pred_mask.astype(bool)
+    gt_mask = gt_mask.astype(bool)
+
+    tp = np.count_nonzero(pred_mask & gt_mask)
+    fp = np.count_nonzero(pred_mask & ~gt_mask)
+    fn = np.count_nonzero(~pred_mask & gt_mask)
+
+    precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+    recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+    f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
+
+    intersection = tp
+    union = np.count_nonzero(pred_mask | gt_mask)
+    iou = intersection / union if union > 0 else 0.0
+
+    return {
+        "precision": precision,
+        "recall": recall,
+        "f1": f1,
+        "iou": iou,
+    }
 
 
 def calculate_metrics(result_path, clean_frames, subtitle_masks):
@@ -237,6 +306,7 @@ def calculate_metrics(result_path, clean_frames, subtitle_masks):
     roi_background_mae_values = []
     whole_roi_mae_values = []
     roi_psnr_values = []
+    mask_metric_values = []
     frame_idx = 0
 
     roi_y = clean_frames[0].shape[0] - 100
@@ -296,19 +366,39 @@ def calculate_metrics(result_path, clean_frames, subtitle_masks):
     return None
 
 
+def calculate_per_scene_metrics(result_path, clean_frames, subtitle_masks, scene_names):
+    """Calculate metrics per scene."""
+    scenes = {}
+    for idx, scene in enumerate(scene_names):
+        if scene not in scenes:
+            scenes[scene] = {"clean": [], "masks": [], "indices": []}
+        scenes[scene]["clean"].append(clean_frames[idx])
+        scenes[scene]["masks"].append(subtitle_masks[idx])
+        scenes[scene]["indices"].append(idx)
+
+    scene_results = {}
+    for scene_name, data in scenes.items():
+        metrics = calculate_metrics(result_path, data["clean"], data["masks"])
+        if metrics:
+            scene_results[scene_name] = metrics
+
+    return scene_results
+
+
 def main():
     print("=== FAST vs SMOOTH vs SMART comparison (ground truth) ===\n")
 
     print("Creating test video with subtitles...")
-    clean_frames, subtitle_masks = create_test_video()
+    clean_frames, subtitle_masks, scene_names = create_test_video()
     total_frames = len(clean_frames)
 
     modes = ["fast", "smooth", "smart"]
     results = {}
+    scene_results = {mode: {} for mode in modes}
 
     for mode in modes:
         print(f"\nProcessing with {mode.upper()} mode...")
-        result_path, processing_elapsed, upload_elapsed = process_video(mode)
+        result_path, processing_elapsed = process_video(mode)
 
         probe = subprocess.run(
             ["ffprobe", "-v", "error", "-show_entries", "stream=r_frame_rate", "-of", "json", result_path],
@@ -324,6 +414,7 @@ def main():
         realtime_factor = processing_fps / output_fps if output_fps > 0 else 0
 
         metrics = calculate_metrics(result_path, clean_frames, subtitle_masks)
+        per_scene = calculate_per_scene_metrics(result_path, clean_frames, subtitle_masks, scene_names)
 
         results[mode] = {
             "path": result_path,
@@ -333,6 +424,7 @@ def main():
             "realtime_factor": realtime_factor,
             "metrics": metrics,
         }
+        scene_results[mode] = per_scene
 
         print(f"  Processing time: {processing_elapsed:.2f}s")
         print(f"  Processing FPS: {processing_fps:.1f}")
@@ -343,7 +435,22 @@ def main():
             print(f"  Whole ROI MAE: {metrics['whole_roi_mae']:.2f}")
             print(f"  ROI PSNR: {metrics['roi_psnr']:.2f}")
 
-    print("\n=== SUMMARY ===")
+    print("\n=== PER-SCENE METRICS ===")
+    for scene_name in ["gradient", "noise", "moving", "bright", "yellow"]:
+        print(f"\nScene: {scene_name}")
+        print(f"  {'Mode':<10} {'Subtitle MAE':<15} {'ROI BG MAE':<12} {'PSNR':<12}")
+        print(f"  {'-'*50}")
+        for mode in modes:
+            if scene_name in scene_results[mode]:
+                m = scene_results[mode][scene_name]
+                sub = f"{m['subtitle_recovery_mae']:.2f}"
+                bg = f"{m['roi_background_mae']:.2f}" if m["roi_background_mae"] is not None else "N/A"
+                psnr = f"{m['roi_psnr']:.2f}"
+                print(f"  {mode.upper():<10} {sub:<15} {bg:<12} {psnr:<12}")
+            else:
+                print(f"  {mode.upper():<10} {'N/A':<15} {'N/A':<12} {'N/A':<12}")
+
+    print("\n=== AGGREGATE SUMMARY ===")
     print(f"{'Mode':<10} {'Proc FPS':<12} {'RT Factor':<12} {'Subtitle MAE':<15} {'ROI BG MAE':<12} {'Whole ROI MAE':<15} {'PSNR':<12}")
     print("-" * 90)
     for mode, data in results.items():

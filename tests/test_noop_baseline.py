@@ -10,9 +10,6 @@ from pathlib import Path
 
 import cv2
 import numpy as np
-import requests
-
-BASE_URL = "http://127.0.0.1:9091"
 
 
 def create_test_video():
@@ -59,7 +56,7 @@ def create_test_video():
         raise RuntimeError("Failed to create test video")
 
     np.save("/tmp/noop-clean-frames.npy", np.array(frames))
-    return test_video
+    return test_video, frames
 
 
 def calculate_metrics(result_path, clean_frames):
@@ -102,55 +99,27 @@ def calculate_metrics(result_path, clean_frames):
     return None
 
 
+def process_noop(frames, output_path):
+    """NOOP processing: just re-encode frames without any modification."""
+    height, width = frames[0].shape[:2]
+    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+    writer = cv2.VideoWriter(str(output_path), fourcc, 30, (width, height))
+    for frame in frames:
+        writer.write(frame)
+    writer.release()
+
+
 def main():
     print("=== NOOP Baseline Test ===\n")
     print("Creating test video...")
-    test_video = create_test_video()
+    test_video, clean_frames = create_test_video()
 
-    session = requests.Session()
-    with open(test_video, "rb") as f:
-        files = {"video": ("test.mp4", f, "video/mp4")}
-        r = session.post(f"{BASE_URL}/api/jobs", files=files)
-    assert r.status_code == 200
-    job = r.json()
-    job_id = job["job_id"]
+    # NOOP: just re-encode without any modification
+    noop_output = "/tmp/noop-result.mp4"
+    print("Running NOOP processing (decode -> re-encode without modification)...")
+    process_noop(clean_frames, noop_output)
 
-    for _ in range(30):
-        r = session.get(f"{BASE_URL}/api/jobs/{job_id}")
-        if r.json().get("status") == "ready":
-            break
-        import time
-        time.sleep(1)
-
-    form = {
-        "x1": 50,
-        "x2": 590,
-        "y": 300,
-        "thickness": 48,
-        "feather": 8,
-        "sample_gap": 4,
-        "mode": "fast",
-        "mask_strength": 50,
-    }
-    r = session.post(f"{BASE_URL}/api/jobs/{job_id}/process", data=form)
-    assert r.status_code == 200
-
-    import time
-    for _ in range(60):
-        r = session.get(f"{BASE_URL}/api/jobs/{job_id}")
-        if r.json().get("status") == "done":
-            break
-        time.sleep(1)
-
-    r = session.get(f"{BASE_URL}/api/jobs/{job_id}/result", stream=True)
-    assert r.status_code == 200
-    result_path = "/tmp/noop-result.mp4"
-    with open(result_path, "wb") as f:
-        for chunk in r.iter_content(chunk_size=1024 * 1024):
-            f.write(chunk)
-
-    clean_frames = np.load("/tmp/noop-clean-frames.npy")
-    metrics = calculate_metrics(result_path, clean_frames)
+    metrics = calculate_metrics(noop_output, clean_frames)
 
     if metrics:
         print(f"NOOP baseline MAE: {metrics['mae']:.2f}")

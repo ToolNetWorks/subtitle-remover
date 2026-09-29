@@ -237,6 +237,17 @@ def test_preview_mask_overlay():
             assert result_img is not None
             assert result_img.shape == roi.shape
 
+            # Verify red overlay exists in detected mask area
+            diff = np.abs(result_img.astype(float) - roi.astype(float))
+            max_diff = np.max(diff)
+            assert max_diff > 10, f"Image should differ from original (max_diff={max_diff})"
+
+            red_pixels = result_img[:, :, 2]
+            green_pixels = result_img[:, :, 1]
+            blue_pixels = result_img[:, :, 0]
+            red_dominant = (red_pixels > green_pixels + 20) & (red_pixels > blue_pixels + 20)
+            assert np.count_nonzero(red_dominant) > 0, "Should have red-dominant pixels in overlay"
+
 
 def test_ground_truth_mask_coverage():
     """Test that mask coverage is reasonable for known text positions."""
