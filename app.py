@@ -12,7 +12,9 @@ from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse
 
 from services.media import extract_frame, probe_video
-from services.remover import remove_strip, process_video
+from services.remover import _clamp_region, remove_strip, process_video
+from services.smart_inpaint import smart_remove
+from services.smart_mask import build_subtitle_mask
 
 
 APP_DIR = Path(__file__).resolve().parent
@@ -93,6 +95,7 @@ def process_worker(
     feather: int,
     sample_gap: int,
     mode: str,
+    mask_strength: int = 50,
 ) -> None:
     directory = job_dir(job_id)
     source = get_source_video(directory)
@@ -122,6 +125,7 @@ def process_worker(
             feather=feather,
             sample_gap=sample_gap,
             mode=mode,
+            mask_strength=mask_strength,
             progress_callback=report,
         )
 
@@ -267,6 +271,67 @@ def preview_image(job_id: str):
     return FileResponse(path, media_type="image/jpeg", headers={"Cache-Control": "no-store"})
 
 
+@app.post("/api/jobs/{job_id}/preview-mask")
+def preview_mask(
+    job_id: str,
+    x1: int = Form(...),
+    x2: int = Form(...),
+    y: int = Form(...),
+    thickness: int = Form(48),
+    mask_strength: int = Form(50),
+):
+    directory = job_dir(job_id)
+    source = get_source_video(directory)
+    state = read_json(directory / "state.json")
+    source_preview = directory / "preview.jpg"
+    mask_preview = directory / "preview-mask.jpg"
+
+    frame = cv2.imread(str(source_preview))
+    if frame is None:
+        meta = probe_video(source)
+        extract_frame(
+            source,
+            source_preview,
+            min(1.0, max(0.0, meta["duration"] / 10)),
+        )
+        frame = cv2.imread(str(source_preview))
+
+    if frame is None:
+        raise HTTPException(500, "Không đọc được preview frame")
+
+    height, width = frame.shape[:2]
+    left, top, right, bottom = _clamp_region(
+        width,
+        height,
+        x1=x1,
+        x2=x2,
+        y=y,
+        thickness=thickness,
+    )
+
+    roi = frame[top:bottom, left:right]
+    if roi.size == 0:
+        raise HTTPException(400, "ROI rỗng")
+
+    try:
+        mask = build_subtitle_mask(roi, strength=mask_strength, outline_px=2)
+    except Exception as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+    overlay = roi.copy()
+    overlay[mask == 255] = (0, 0, 255)
+    alpha = 0.45
+    cv2.addWeighted(overlay, alpha, roi, 1.0 - alpha, 0, roi)
+
+    frame[top:bottom, left:right] = roi
+    cv2.imwrite(str(mask_preview), frame)
+    return FileResponse(
+        mask_preview,
+        media_type="image/jpeg",
+        headers={"Cache-Control": "no-store"},
+    )
+
+
 @app.post("/api/jobs/{job_id}/preview")
 def create_preview(
     job_id: str,
@@ -277,6 +342,7 @@ def create_preview(
     feather: int = Form(8),
     sample_gap: int = Form(4),
     mode: str = Form("smooth"),
+    mask_strength: int = Form(50),
 ):
     directory = job_dir(job_id)
     source = get_source_video(directory)
@@ -307,6 +373,7 @@ def create_preview(
             feather=feather,
             sample_gap=sample_gap,
             mode=mode,
+            mask_strength=mask_strength,
         )
     except Exception as exc:
         raise HTTPException(400, str(exc)) from exc
@@ -329,6 +396,7 @@ def start_process(
     feather: int = Form(8),
     sample_gap: int = Form(4),
     mode: str = Form("smooth"),
+    mask_strength: int = Form(50),
 ) -> dict:
     directory = job_dir(job_id)
     state = read_json(directory / "state.json")
@@ -336,8 +404,8 @@ def start_process(
     if state.get("status") in {"queued", "processing"}:
         return state
 
-    if mode not in {"fast", "smooth"}:
-        raise HTTPException(400, "mode phải là fast hoặc smooth")
+    if mode not in {"fast", "smooth", "smart"}:
+        raise HTTPException(400, "mode phải là fast, smooth, hoặc smart")
     if thickness < 2 or thickness > int(state["height"]):
         raise HTTPException(400, "Thickness không hợp lệ")
     if feather < 0 or feather > 100:
@@ -372,6 +440,7 @@ def start_process(
             "feather": feather,
             "sample_gap": sample_gap,
             "mode": mode,
+            "mask_strength": mask_strength,
         },
         daemon=True,
     ).start()

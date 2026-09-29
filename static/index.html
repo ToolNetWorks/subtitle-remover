@@ -566,8 +566,14 @@
             <span id="featherValue" style="color:var(--text);font-weight:600">8 px</span>
           </label>
 
+          <label>Mask Strength
+            <input id="maskStrength" type="range" min="0" max="100" value="50">
+            <span id="maskStrengthValue" style="color:var(--text);font-weight:600">50</span>
+          </label>
+
           <label>Mode
             <select id="mode">
+              <option value="smart">Smart</option>
               <option value="smooth">Smooth</option>
               <option value="fast">Fast</option>
             </select>
@@ -580,8 +586,13 @@
         </div>
 
         <div id="previewArea" class="preview-toggle">
-          <div class="label">Original | Preview</div>
-          <div class="compare-grid" id="compareGrid">
+          <div class="label">Original | Mask | Result</div>
+          <div class="segmented-control" style="margin-top:8px">
+            <button id="previewOriginalBtn" class="active">Original</button>
+            <button id="previewMaskBtn">Mask</button>
+            <button id="previewResultBtn">Result</button>
+          </div>
+          <div class="compare-grid" id="compareGrid" style="margin-top:10px">
             <img id="originalPreview" alt="Original">
             <img id="cleanPreview" alt="Preview">
           </div>
@@ -635,7 +646,8 @@
         thickness: 48,
         feather: 8,
         sample_gap: 4,
-        mode: "smooth",
+        mode: "smart",
+        mask_strength: 50,
       },
     };
 
@@ -683,6 +695,7 @@
       f.append("feather", state.settings.feather);
       f.append("sample_gap", state.settings.sample_gap);
       f.append("mode", state.settings.mode);
+      f.append("mask_strength", state.settings.mask_strength);
       return f;
     }
 
@@ -925,41 +938,84 @@
       loop();
     }
 
-      function requestPreview() {
-        if (!state.jobId) return;
+    function requestPreview() {
+      if (!state.jobId) return;
 
-        const btn = $("previewBtn");
-        const originalText = btn.textContent;
-        btn.disabled = true;
-        btn.textContent = "Đang tạo preview...";
-        showError("");
+      const btn = $("previewBtn");
+      const originalText = btn.textContent;
+      btn.disabled = true;
+      btn.textContent = "Đang tạo preview...";
+      showError("");
 
-        fetch(API_BASE + `/api/jobs/${state.jobId}/preview`, { method: "POST", body: buildFormData() })
-          .then(async r => {
-            if (!r.ok) {
-              const data = await r.json().catch(() => ({}));
-              throw new Error(data.detail || "Preview lỗi");
-            }
-            return r.blob();
-          })
-          .then(blob => {
-            const url = URL.createObjectURL(blob);
-            const clean = $("cleanPreview");
-            clean.src = url;
-            clean.style.display = "";
-            $("previewArea").style.display = "";
-            $("compareGrid").style.display = "grid";
-            $("originalPreview").src = API_BASE + `/api/jobs/${state.jobId}/preview-image?v=${Date.now()}`;
-            $("originalPreview").style.display = "";
-          })
-          .catch(err => {
-            showError(err.message || "Preview lỗi");
-          })
-          .finally(() => {
-            btn.disabled = false;
-            btn.textContent = originalText;
-          });
-      }
+      fetch(API_BASE + `/api/jobs/${state.jobId}/preview`, { method: "POST", body: buildFormData() })
+        .then(async r => {
+          if (!r.ok) {
+            const data = await r.json().catch(() => ({}));
+            throw new Error(data.detail || "Preview lỗi");
+          }
+          return r.blob();
+        })
+        .then(blob => {
+          const url = URL.createObjectURL(blob);
+          const clean = $("cleanPreview");
+          clean.src = url;
+          clean.style.display = "";
+          $("previewArea").style.display = "";
+          $("compareGrid").style.display = "grid";
+          $("originalPreview").src = API_BASE + `/api/jobs/${state.jobId}/preview-image?v=${Date.now()}`;
+          $("originalPreview").style.display = "";
+        })
+        .catch(err => {
+          showError(err.message || "Preview lỗi");
+        })
+        .finally(() => {
+          btn.disabled = false;
+          btn.textContent = originalText;
+        });
+    }
+
+    function showPreviewMask() {
+      if (!state.jobId) return;
+      const btn = $("previewMaskBtn");
+      const originalText = btn.textContent;
+      btn.disabled = true;
+      btn.textContent = "Đang tạo mask...";
+
+      const form = buildFormData();
+
+      fetch(API_BASE + `/api/jobs/${state.jobId}/preview-mask`, { method: "POST", body: form })
+        .then(async r => {
+          if (!r.ok) {
+            const data = await r.json().catch(() => ({}));
+            throw new Error(data.detail || "Mask lỗi");
+          }
+          return r.blob();
+        })
+        .then(blob => {
+          const url = URL.createObjectURL(blob);
+          const clean = $("cleanPreview");
+          clean.src = url;
+          clean.style.display = "";
+          $("previewArea").style.display = "";
+          $("compareGrid").style.display = "grid";
+          $("originalPreview").src = API_BASE + `/api/jobs/${state.jobId}/preview-image?v=${Date.now()}`;
+          $("originalPreview").style.display = "";
+        })
+        .catch(err => {
+          showError(err.message || "Mask lỗi");
+        })
+        .finally(() => {
+          btn.disabled = false;
+          btn.textContent = originalText;
+        });
+    }
+
+    function updatePreviewActiveButton(activeBtn) {
+      ["previewOriginalBtn", "previewMaskBtn", "previewResultBtn"].forEach(id => {
+        const el = $(id);
+        if (el) el.classList.toggle("active", el === activeBtn);
+      });
+    }
 
     function startProcessing() {
       if (!state.jobId) return;
@@ -1040,7 +1096,7 @@
       state.scaleY = 1;
       state.p1 = { x: 120, y: 400 };
       state.p2 = { x: 800, y: 400 };
-      state.settings = { thickness: 48, feather: 8, sample_gap: 4, mode: "smooth" };
+      state.settings = { thickness: 48, feather: 8, sample_gap: 4, mode: "smart", mask_strength: 50 };
 
       $("videoInput").value = "";
       $("uploadBtn").disabled = true;
@@ -1096,13 +1152,51 @@
         draw();
       });
 
+      $("maskStrength").addEventListener("input", e => {
+        state.settings.mask_strength = Number(e.target.value);
+        $("maskStrengthValue").textContent = e.target.value;
+      });
+
+      function updateModeUI() {
+        const mode = state.settings.mode;
+        const isSmart = mode === "smart";
+        $("feather").closest("label").style.display = isSmart ? "none" : "";
+        $("maskStrength").closest("label").style.display = isSmart ? "" : "none";
+      }
+
       $("mode").addEventListener("change", e => {
         state.settings.mode = e.target.value;
+        updateModeUI();
       });
+
+      updateModeUI();
 
       $("previewBtn").addEventListener("click", requestPreview);
       $("processBtn").addEventListener("click", startProcessing);
       $("resetBtn").addEventListener("click", resetTool);
+
+      if ($("previewOriginalBtn")) {
+        $("previewOriginalBtn").addEventListener("click", () => {
+          updatePreviewActiveButton($("previewOriginalBtn"));
+          $("originalPreview").src = API_BASE + `/api/jobs/${state.jobId}/preview-image?v=${Date.now()}`;
+          $("originalPreview").style.display = "";
+          $("cleanPreview").style.display = "none";
+        });
+      }
+
+      if ($("previewMaskBtn")) {
+        $("previewMaskBtn").addEventListener("click", () => {
+          updatePreviewActiveButton($("previewMaskBtn"));
+          showPreviewMask();
+        });
+      }
+
+      if ($("previewResultBtn")) {
+        $("previewResultBtn").addEventListener("click", () => {
+          updatePreviewActiveButton($("previewResultBtn"));
+          requestPreview();
+        });
+      }
 
       $("replayBtn").addEventListener("click", () => {
         const v = $("resultVideo");

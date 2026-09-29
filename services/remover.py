@@ -10,6 +10,7 @@ import cv2
 import numpy as np
 
 from .media import mux_audio, probe_video
+from .smart_inpaint import smart_remove
 
 
 ProgressCallback = Callable[[dict], None]
@@ -144,11 +145,12 @@ def remove_strip(
     feather: int = 8,
     sample_gap: int = 4,
     mode: str = "smooth",
+    mask_strength: int = 50,
 ) -> np.ndarray:
     if frame is None or frame.size == 0:
         raise RemoveError("Empty video frame")
-    if mode not in {"fast", "smooth"}:
-        raise RemoveError("mode must be fast or smooth")
+    if mode not in {"fast", "smooth", "smart"}:
+        raise RemoveError("mode must be fast, smooth, or smart")
 
     height, width = frame.shape[:2]
     left, top, right, bottom = _clamp_region(
@@ -170,14 +172,24 @@ def remove_strip(
             sample_gap=max(1, int(sample_gap)),
         )
 
-    return _smooth_fill(
+    if mode == "smooth":
+        return _smooth_fill(
+            frame,
+            left=left,
+            top=top,
+            right=right,
+            bottom=bottom,
+            sample_gap=max(1, int(sample_gap)),
+            feather=max(0, int(feather)),
+        )
+
+    return smart_remove(
         frame,
         left=left,
         top=top,
         right=right,
         bottom=bottom,
-        sample_gap=max(1, int(sample_gap)),
-        feather=max(0, int(feather)),
+        mask_strength=max(0, min(100, int(mask_strength))),
     )
 
 
@@ -193,6 +205,7 @@ def process_video(
     feather: int,
     sample_gap: int,
     mode: str,
+    mask_strength: int = 50,
     progress_callback: ProgressCallback,
 ) -> dict:
     meta = probe_video(input_path)
@@ -244,6 +257,7 @@ def process_video(
                 feather=feather,
                 sample_gap=sample_gap,
                 mode=mode,
+                mask_strength=mask_strength,
             )
             writer.write(cleaned)
             processed += 1
