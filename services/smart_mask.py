@@ -31,9 +31,11 @@ def _kernel(size: int) -> np.ndarray:
     return cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (size, size))
 
 
-def _scale_outline(base_px: int, roi_height: int) -> int:
-    """Scale outline pixels based on ROI height."""
-    scale = max(0.5, roi_height / 1080.0)
+def _scale_outline(base_px: int, frame_height: int) -> int:
+    """Scale outline pixels based on full frame height."""
+    if frame_height <= 0:
+        frame_height = 1080
+    scale = max(0.5, frame_height / 1080.0)
     return max(1, int(round(base_px * scale)))
 
 
@@ -41,6 +43,7 @@ def build_subtitle_mask(
     roi: np.ndarray,
     strength: int = 50,
     outline_px: int = 2,
+    frame_height: int = 0,
 ) -> SmartMaskResult:
     if roi is None or roi.size == 0:
         raise SmartMaskError("Empty ROI")
@@ -49,11 +52,12 @@ def build_subtitle_mask(
     gray = _ensure_gray(roi)
     height, width = gray.shape[:2]
 
-    # Scale outline based on resolution
-    scaled_outline = _scale_outline(outline_px, height)
+    if frame_height <= 0:
+        frame_height = height
+
+    scaled_outline = _scale_outline(outline_px, frame_height)
     outline_kernel = _kernel(max(1, scaled_outline * 2 + 1))
 
-    # Adaptive kernel size based on ROI
     kernel_size = max(3, (min(height, width) // 120) * 2 + 1)
     kernel = _kernel(kernel_size)
 
@@ -62,22 +66,34 @@ def build_subtitle_mask(
     tophat = cv2.morphologyEx(blur, cv2.MORPH_TOPHAT, kernel)
     blackhat = cv2.morphologyEx(blur, cv2.MORPH_BLACKHAT, kernel)
 
-    mean_val = float(np.mean(blur))
-    std_val = float(np.std(blur))
-    if std_val < 1.0:
-        std_val = 1.0
-
-    # Adaptive threshold using Otsu
-    _, bright_mask = cv2.threshold(
+    # Get Otsu thresholds as baseline
+    otsu_bright, _ = cv2.threshold(
         tophat, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU
     )
-    _, dark_mask = cv2.threshold(
+    otsu_dark, _ = cv2.threshold(
         blackhat, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU
+    )
+
+    # Adjust threshold based on strength
+    # strength 0 -> threshold = Otsu * 1.5 (conservative)
+    # strength 50 -> threshold = Otsu (baseline)
+    # strength 100 -> threshold = Otsu * 0.5 (aggressive)
+    strength_factor = strength / 100.0
+    threshold_scale = 1.5 - strength_factor
+
+    bright_thresh = max(8.0, float(otsu_bright) * threshold_scale)
+    dark_thresh = max(8.0, float(otsu_dark) * threshold_scale)
+
+    _, bright_mask = cv2.threshold(
+        tophat, bright_thresh, 255, cv2.THRESH_BINARY
+    )
+    _, dark_mask = cv2.threshold(
+        blackhat, dark_thresh, 255, cv2.THRESH_BINARY
     )
 
     combined = cv2.bitwise_or(bright_mask, dark_mask)
 
-    if combined.sum() == 0:
+    if np.count_nonzero(combined) == 0:
         return SmartMaskResult(
             mask=np.zeros(gray.shape, dtype=np.uint8),
             had_mask=False,
@@ -86,7 +102,6 @@ def build_subtitle_mask(
             stats={"frames_with_mask": 0, "frames_without_mask": 1, "unreliable_frames": 0},
         )
 
-    # Close gaps in mask
     close_width = max(3, min(width // 4, 51))
     close_height = max(3, min(height // 8, 15))
     close_kernel = cv2.getStructuringElement(
@@ -95,7 +110,6 @@ def build_subtitle_mask(
     combined = cv2.morphologyEx(combined, cv2.MORPH_CLOSE, close_kernel)
     combined = cv2.dilate(combined, kernel, iterations=1)
 
-    # Component filtering
     min_area = max(4, int((height * width) * 0.0004))
     max_area = int((height * width) * 0.45)
 
@@ -122,7 +136,7 @@ def build_subtitle_mask(
         clean[labels == label] = 255
         kept += 1
 
-    if clean.sum() == 0:
+    if np.count_nonzero(clean) == 0:
         return SmartMaskResult(
             mask=np.zeros(gray.shape, dtype=np.uint8),
             had_mask=False,
@@ -133,7 +147,6 @@ def build_subtitle_mask(
 
     combined = clean
 
-    # Strength-based dilation (0-100 maps to 0-3 iterations)
     max_dilation = max(1, min(4, int(strength / 25)))
     dilation_strength = max(0, min(max_dilation, 3))
     if dilation_strength > 0:
@@ -145,20 +158,18 @@ def build_subtitle_mask(
         combined.shape[0] * combined.shape[1]
     )
 
-    # Safety: if coverage is too high, try conservative mask
     if coverage > 0.35:
         combined = clean
         coverage = float(np.count_nonzero(combined)) / float(
             combined.shape[0] * combined.shape[1]
         )
 
-    # Final safety check
     final_coverage = float(np.count_nonzero(combined)) / float(
         combined.shape[0] * combined.shape[1]
     )
 
     reliable = final_coverage <= 0.40
-    had_mask = combined.sum() > 0
+    had_mask = np.count_nonzero(combined) > 0
 
     if not reliable:
         return SmartMaskResult(

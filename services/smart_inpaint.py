@@ -45,7 +45,7 @@ def smart_remove(
 
     try:
         mask_result = build_subtitle_mask(
-            roi, strength=mask_strength, outline_px=outline_px
+            roi, strength=mask_strength, outline_px=outline_px, frame_height=height
         )
     except SmartMaskError:
         empty_mask = np.zeros(roi.shape[:2], dtype=np.uint8)
@@ -59,7 +59,7 @@ def smart_remove(
         return frame, mask_result
 
     mask = mask_result.mask
-    if mask is None or mask.sum() == 0:
+    if mask is None or np.count_nonzero(mask) == 0:
         return frame, mask_result
 
     inpaint_radius = max(1, min(int(inpaint_radius), 5))

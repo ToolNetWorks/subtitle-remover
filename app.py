@@ -314,10 +314,13 @@ def preview_mask(
         raise HTTPException(400, "ROI rỗng")
 
     try:
-        mask = build_subtitle_mask(roi, strength=mask_strength, outline_px=2)
+        mask_result = build_subtitle_mask(
+            roi, strength=mask_strength, outline_px=2, frame_height=height
+        )
     except Exception as exc:
         raise HTTPException(400, str(exc)) from exc
 
+    mask = mask_result.mask
     overlay = roi.copy()
     overlay[mask == 255] = (0, 0, 255)
     alpha = 0.45

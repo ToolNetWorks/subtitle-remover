@@ -274,7 +274,7 @@ def process_video(
                 smart_stats["frames_without_mask"] += mask_result.stats.get("frames_without_mask", 0)
                 smart_stats["unreliable_frames"] += mask_result.stats.get("unreliable_frames", 0)
                 if mask_result.had_mask:
-                    smart_stats["total_mask_pixels"] += int(mask_result.mask.sum())
+                    smart_stats["total_mask_pixels"] += int(np.count_nonzero(mask_result.mask))
                     mask_coverages.append(mask_result.coverage)
                     if mask_result.coverage > smart_stats["max_mask_coverage"]:
                         smart_stats["max_mask_coverage"] = mask_result.coverage
