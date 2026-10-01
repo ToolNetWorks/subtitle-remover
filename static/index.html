@@ -633,6 +633,7 @@
       stage: "upload",
       jobId: null,
       uploading: false,
+      uploadStartTime: 0,
       preparing: false,
       processing: false,
       polling: null,
@@ -797,20 +798,161 @@
       if (state.uploading) return;
 
       state.uploading = true;
+      state.uploadStartTime = Date.now();
       showError("");
       $("uploadBtn").disabled = true;
       $("uploadProgress").style.display = "block";
       $("uploadBar").style.width = "0%";
       $("uploadMeta").textContent = "Đang tải video lên...";
 
+      initStreamingUpload(file).catch((err) => {
+        // Guard: fallback legacy endpoint khi streaming init thất bại (vd server cũ).
+        if (err && err.useLegacy) {
+          legacyUpload(file);
+          return;
+        }
+        state.uploading = false;
+        showError((err && err.message) || "Khởi tạo upload thất bại.");
+        $("uploadBtn").disabled = false;
+        $("uploadMeta").textContent = "Tải video lên";
+        $("uploadProgress").style.display = "none";
+      });
+    }
+
+    async function initStreamingUpload(file) {
+      let initData;
+      try {
+        const r = await fetch(API_BASE + "/api/uploads/init", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ filename: file.name, filesize: file.size }),
+        });
+        if (r.status === 404) {
+          throw { useLegacy: true };
+        }
+        if (!r.ok) {
+          const data = await r.json().catch(() => ({}));
+          throw new Error(data.detail || "Khởi tạo upload thất bại.");
+        }
+        initData = await r.json();
+      } catch (err) {
+        if (err && err.useLegacy) throw err;
+        if (err instanceof TypeError) throw new Error("Mất kết nối. Vui lòng thử lại.");
+        throw err;
+      }
+
+      if (!initData || !initData.job_id) {
+        throw new Error("Phản hồi server không hợp lệ.");
+      }
+
+      streamUploadFile(initData.job_id, file);
+    }
+
+    function streamUploadFile(jobId, file) {
       const xhr = new XMLHttpRequest();
-      xhr.open("POST", API_BASE + "/api/jobs", true);
+      xhr.open("PUT", API_BASE + `/api/uploads/${jobId}/file`, true);
+      xhr.timeout = 120000;
+      xhr.setRequestHeader("Content-Type", "application/octet-stream");
+      xhr.setRequestHeader("X-Filename", encodeURIComponent(file.name));
+
+      let serverAcked = false;
 
       xhr.upload.onprogress = (e) => {
         if (e.lengthComputable) {
           const pct = Math.round((e.loaded / e.total) * 100);
           $("uploadBar").style.width = `${pct}%`;
-          $("uploadMeta").textContent = `Đang tải video lên... ${pct}% • ${formatBytes(e.loaded)} / ${formatBytes(e.total)}`;
+          if (pct >= 100) {
+            // Browser -> edge xong, nhưng origin + disk save + response vẫn pending.
+            $("uploadMeta").innerHTML = '<span class="spinner"></span>Đã tải xong dữ liệu. Đang chờ server xác nhận...';
+          } else {
+            $("uploadMeta").textContent = `Đang tải video lên... ${pct}% • ${formatBytes(e.loaded)} / ${formatBytes(e.total)}`;
+          }
+        } else {
+          $("uploadMeta").textContent = `Đang tải video lên... ${formatBytes(e.loaded)}`;
+        }
+      };
+
+      xhr.onload = () => {
+        state.uploading = false;
+        serverAcked = true;
+        if (xhr.status < 200 || xhr.status >= 300) {
+          let msg = "Upload lỗi";
+          try {
+            const data = JSON.parse(xhr.responseText);
+            msg = data.detail || msg;
+          } catch {
+            // ignore parse error
+          }
+          showError(`${msg} (mã ${xhr.status})`);
+          $("uploadBtn").disabled = false;
+          $("uploadMeta").textContent = "Tải video lên";
+          $("uploadProgress").style.display = "none";
+          return;
+        }
+
+        let data;
+        try {
+          data = JSON.parse(xhr.responseText);
+        } catch {
+          showError("Phản hồi server không hợp lệ.");
+          $("uploadBtn").disabled = false;
+          $("uploadMeta").textContent = "Tải video lên";
+          $("uploadProgress").style.display = "none";
+          return;
+        }
+
+        const clientMs = Date.now() - (state.uploadStartTime || Date.now());
+        console.log("[upload] client_ms=", clientMs, "server_timing=", data.timing);
+
+        state.jobId = data.job_id;
+        $("uploadBar").style.width = "100%";
+        $("uploadMeta").innerHTML = '<span class="spinner"></span>Đang chuẩn bị preview...';
+
+        waitUntilReady(state.jobId);
+      };
+
+      xhr.onerror = () => {
+        state.uploading = false;
+        showError("Mất kết nối trong lúc tải lên. Vui lòng kiểm tra mạng và thử lại.");
+        $("uploadBtn").disabled = false;
+        $("uploadMeta").textContent = "Tải video lên";
+        $("uploadProgress").style.display = "none";
+      };
+
+      xhr.ontimeout = () => {
+        state.uploading = false;
+        showError("Server phản hồi quá lâu (quá 120 giây). File có thể vẫn đang được xử lý — vui lòng thử lại hoặc dùng file nhỏ hơn.");
+        $("uploadBtn").disabled = false;
+        $("uploadMeta").textContent = "Tải video lên";
+        $("uploadProgress").style.display = "none";
+      };
+
+      xhr.onabort = () => {
+        if (serverAcked) return;
+        state.uploading = false;
+        showError("Upload đã bị hủy.");
+        $("uploadBtn").disabled = false;
+        $("uploadMeta").textContent = "Tải video lên";
+        $("uploadProgress").style.display = "none";
+      };
+
+      xhr.send(file);
+    }
+
+    function legacyUpload(file) {
+      const xhr = new XMLHttpRequest();
+      xhr.open("POST", API_BASE + "/api/jobs", true);
+      xhr.timeout = 120000;
+
+      xhr.upload.onprogress = (e) => {
+        if (e.lengthComputable) {
+          const pct = Math.round((e.loaded / e.total) * 100);
+          $("uploadBar").style.width = `${pct}%`;
+          if (pct >= 100) {
+            $("uploadMeta").innerHTML = '<span class="spinner"></span>Đã tải xong dữ liệu. Đang chờ server xác nhận...';
+          } else {
+            $("uploadMeta").textContent = `Đang tải video lên... ${pct}% • ${formatBytes(e.loaded)} / ${formatBytes(e.total)}`;
+          }
         } else {
           $("uploadMeta").textContent = `Đang tải video lên... ${formatBytes(e.loaded)}`;
         }
@@ -826,7 +968,7 @@
           } catch {
             // ignore parse error
           }
-          showError(msg);
+          showError(`${msg} (mã ${xhr.status})`);
           $("uploadBtn").disabled = false;
           $("uploadMeta").textContent = "Tải video lên";
           $("uploadProgress").style.display = "none";
@@ -860,7 +1002,15 @@
 
       xhr.ontimeout = () => {
         state.uploading = false;
-        showError("Tải video lên quá thời gian. Vui lòng thử lại.");
+        showError("Tải video lên quá thời gian (quá 120 giây). Vui lòng thử lại.");
+        $("uploadBtn").disabled = false;
+        $("uploadMeta").textContent = "Tải video lên";
+        $("uploadProgress").style.display = "none";
+      };
+
+      xhr.onabort = () => {
+        state.uploading = false;
+        showError("Upload đã bị hủy.");
         $("uploadBtn").disabled = false;
         $("uploadMeta").textContent = "Tải video lên";
         $("uploadProgress").style.display = "none";
@@ -926,6 +1076,8 @@
 
             if (status === "preparing") {
               $("uploadMeta").innerHTML = '<span class="spinner"></span>' + (d.message || "Đang chuẩn bị preview...");
+            } else if (status === "created" || status === "uploading" || status === "uploaded") {
+              $("uploadMeta").innerHTML = '<span class="spinner"></span>' + (d.message || "Đã tải xong dữ liệu. Đang chờ server xác nhận...");
             }
           } catch {
             // network hiccup, keep polling
@@ -1088,6 +1240,7 @@
     function resetTool() {
       state.jobId = null;
       state.uploading = false;
+      state.uploadStartTime = 0;
       state.preparing = false;
       state.processing = false;
       state.polling = false;

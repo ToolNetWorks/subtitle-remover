@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import shutil
 import threading
 import time
@@ -8,7 +9,7 @@ import uuid
 from pathlib import Path
 
 import cv2
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse
 
 from services.media import extract_frame, probe_video
@@ -22,6 +23,11 @@ DATA_DIR = Path("/var/lib/subtitle-remover/jobs")
 MAX_VIDEO_BYTES = 4 * 1024 * 1024 * 1024
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".mkv", ".webm", ".m4v"}
 JOB_TTL_SECONDS = 6 * 60 * 60
+UPLOAD_CHUNK_SIZE = 1024 * 1024
+# created -> uploading -> uploaded -> preparing -> ready | failed
+UPLOAD_RESUMABLE_STATUSES = {"created", "uploading", "uploaded", "failed"}
+
+logger = logging.getLogger("subtitle-remover")
 
 app = FastAPI(title="Subtitle Remover", version="1.0.0")
 
@@ -222,8 +228,181 @@ def prepare_job(job_id: str, source: Path) -> None:
     })
 
 
+@app.post("/api/uploads/init")
+async def init_upload(request: Request) -> dict:
+    """Create job first, frontend streams raw bytes afterwards.
+
+    Body JSON: {"filename": "clip.mp4", "filesize": 12345}
+    Returns job_id + upload_url immediately (no ffprobe here).
+    """
+    try:
+        payload = await request.json()
+    except Exception:
+        raise HTTPException(400, "Body JSON không hợp lệ")
+
+    if not isinstance(payload, dict):
+        raise HTTPException(400, "Body JSON không hợp lệ")
+
+    filename = str(payload.get("filename") or "")
+    filesize = payload.get("filesize")
+
+    # Guard: extension
+    suffix = Path(filename).suffix.lower()
+    if suffix not in VIDEO_EXTENSIONS:
+        raise HTTPException(400, f"Không hỗ trợ định dạng: {suffix or 'unknown'}")
+
+    # Guard: filesize (optional but validated when present)
+    if filesize is not None:
+        try:
+            filesize = int(filesize)
+        except (TypeError, ValueError):
+            raise HTTPException(400, "Filesize không hợp lệ")
+        if filesize <= 0:
+            raise HTTPException(400, "Filesize không hợp lệ")
+        if filesize > MAX_VIDEO_BYTES:
+            raise HTTPException(413, "Video vượt quá 4 GB")
+
+    job_id = uuid.uuid4().hex
+    directory = job_dir(job_id)
+    directory.mkdir(parents=True, exist_ok=False)
+
+    state = {
+        "job_id": job_id,
+        "status": "created",
+        "progress": 0,
+        "message": "Đã tạo job, chờ upload.",
+        "created_at": time.time(),
+        "video_filename": Path(filename).name,
+        "video_suffix": suffix,
+        "expected_bytes": filesize,
+    }
+    write_json(directory / "state.json", state)
+    logger.info("upload init job=%s file=%s size=%s", job_id, filename, filesize)
+
+    return {
+        **state,
+        "upload_url": f"/api/uploads/{job_id}/file",
+    }
+
+
+@app.put("/api/uploads/{job_id}/file")
+async def upload_stream(job_id: str, request: Request) -> dict:
+    """Stream raw request body directly to disk, no multipart spool, no RAM hold.
+
+    Client sends: PUT raw File bytes (Content-Type: application/octet-stream).
+    Response is returned right after disk write completes; preview runs in background.
+    """
+    directory = job_dir(job_id)
+    state_path = directory / "state.json"
+    if not state_path.exists():
+        raise HTTPException(404, "Job không tồn tại")
+    state = read_json(state_path)
+
+    # Guard: do not overwrite a job already past upload phase
+    if state.get("status") not in UPLOAD_RESUMABLE_STATUSES:
+        raise HTTPException(409, f"Job đã ở trạng thái {state.get('status')}, không thể upload lại")
+
+    suffix = str(state.get("video_suffix") or "")
+    if suffix not in VIDEO_EXTENSIONS:
+        raise HTTPException(400, "Job thiếu định dạng video, hãy init lại")
+
+    # Guard: optional Content-Length pre-check (early return, no disk I/O)
+    content_length = request.headers.get("content-length")
+    if content_length is not None:
+        try:
+            if int(content_length) > MAX_VIDEO_BYTES:
+                raise HTTPException(413, "Video vượt quá 4 GB")
+            if int(content_length) <= 0:
+                raise HTTPException(400, "Video rỗng")
+        except ValueError:
+            pass
+
+    destination = directory / f"input{suffix}"
+    patch_state(job_id, {
+        "status": "uploading",
+        "progress": 0,
+        "message": "Đang nhận dữ liệu upload...",
+        "upload_started_at": time.time(),
+        "error": None,
+    })
+
+    t_start = time.monotonic()
+    written = 0
+    try:
+        with destination.open("wb") as output:
+            async for chunk in request.stream():
+                if not chunk:
+                    continue
+                written += len(chunk)
+                if written > MAX_VIDEO_BYTES:
+                    output.close()
+                    destination.unlink(missing_ok=True)
+                    patch_state(job_id, {
+                        "status": "failed",
+                        "message": "Upload thất bại.",
+                        "error": "Video vượt quá 4 GB",
+                        "completed_at": time.time(),
+                    })
+                    raise HTTPException(413, "Video vượt quá 4 GB")
+                output.write(chunk)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        destination.unlink(missing_ok=True)
+        patch_state(job_id, {
+            "status": "failed",
+            "message": "Upload thất bại.",
+            "error": str(exc),
+            "completed_at": time.time(),
+        })
+        raise HTTPException(500, f"Ghi file thất bại: {exc}")
+
+    stream_ms = (time.monotonic() - t_start) * 1000.0
+
+    # Guard: empty body
+    if written <= 0:
+        destination.unlink(missing_ok=True)
+        patch_state(job_id, {
+            "status": "failed",
+            "message": "Upload thất bại.",
+            "error": "Video rỗng",
+            "completed_at": time.time(),
+        })
+        raise HTTPException(400, "Video rỗng")
+
+    logger.info(
+        "upload stream complete job=%s bytes=%d stream_ms=%.1f",
+        job_id, written, stream_ms,
+    )
+
+    new_state = {
+        "status": "uploaded",
+        "progress": 0,
+        "message": "Đã nhận video.",
+        "video_size": written,
+        "uploaded_at": time.time(),
+        "timing": {
+            "receive_save_ms": round(stream_ms, 1),
+        },
+    }
+    patch_state(job_id, new_state)
+
+    # Preview runs in background — never inside upload request.
+    threading.Thread(
+        target=prepare_job,
+        args=(job_id, destination),
+        daemon=True,
+    ).start()
+
+    # Return uploaded snapshot (not re-read: prepare thread may have
+    # already flipped state to preparing — polling covers that).
+    return {**state, **new_state, "job_id": job_id}
+
+
 @app.post("/api/jobs")
 def create_job(video: UploadFile = File(...)) -> dict:
+    """Legacy multipart upload (compat). Frontend mới dùng /api/uploads/* streaming."""
+    t_handler_start = time.monotonic()
     suffix = Path(video.filename or "").suffix.lower()
     if suffix not in VIDEO_EXTENSIONS:
         raise HTTPException(400, f"Không hỗ trợ định dạng: {suffix or 'unknown'}")
@@ -234,10 +413,21 @@ def create_job(video: UploadFile = File(...)) -> dict:
     source = directory / f"input{suffix}"
 
     try:
+        t_save_start = time.monotonic()
         save_upload(video, source)
+        save_ms = (time.monotonic() - t_save_start) * 1000.0
     except Exception:
         shutil.rmtree(directory, ignore_errors=True)
         raise
+
+    handler_ms = (time.monotonic() - t_handler_start) * 1000.0
+    # NOTE: handler_ms excludes Starlette multipart spool time (full body parse
+    # happens before this function runs) + Cloudflare edge->origin transfer.
+    # That hidden latency is exactly what caused "100% stuck" via tunnel.
+    logger.info(
+        "legacy upload job=%s bytes=%d save_ms=%.1f handler_ms=%.1f",
+        job_id, source.stat().st_size if source.exists() else -1, save_ms, handler_ms,
+    )
 
     state = {
         "job_id": job_id,
@@ -246,6 +436,10 @@ def create_job(video: UploadFile = File(...)) -> dict:
         "message": "Đã nhận video.",
         "created_at": time.time(),
         "video_filename": video.filename,
+        "timing": {
+            "save_ms": round(save_ms, 1),
+            "handler_ms": round(handler_ms, 1),
+        },
     }
     write_json(directory / "state.json", state)
 
