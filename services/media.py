@@ -88,6 +88,35 @@ def extract_frame(
     ])
 
 
+def concat_videos(chunk_files: list[Path], output_path: Path) -> None:
+    if not chunk_files:
+        raise MediaError("No chunks to concat")
+    for path in chunk_files:
+        if not path.exists():
+            raise MediaError(f"Missing chunk: {path}")
+    import tempfile
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as tmp:
+        for path in chunk_files:
+            tmp.write(f"file '{path.resolve()}'\n")
+        list_path = tmp.name
+    try:
+        result = subprocess.run(
+            ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", list_path,
+             "-c", "copy", str(output_path)],
+            capture_output=True, text=True, check=False)
+        if result.returncode == 0 and output_path.exists():
+            return
+        # Fallback re-encode if copy incompatible
+        _run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", list_path,
+              "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+              str(output_path)])
+    finally:
+        try:
+            Path(list_path).unlink(missing_ok=True)
+        except Exception:
+            pass
+
+
 def mux_audio(
     processed_video: Path,
     source_video: Path,

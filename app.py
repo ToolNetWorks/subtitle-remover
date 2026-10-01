@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import shutil
 import threading
 import time
@@ -19,11 +20,12 @@ from services.smart_mask import build_subtitle_mask
 
 
 APP_DIR = Path(__file__).resolve().parent
-DATA_DIR = Path("/var/lib/subtitle-remover/jobs")
+DATA_DIR = Path(os.getenv("DATA_DIR", "/var/lib/subtitle-remover/jobs"))
 MAX_VIDEO_BYTES = 4 * 1024 * 1024 * 1024
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".mkv", ".webm", ".m4v"}
 JOB_TTL_SECONDS = 6 * 60 * 60
 UPLOAD_CHUNK_SIZE = 1024 * 1024
+VALID_MODES = {"fast", "smooth", "smart", "cover"}
 # created -> uploading -> uploaded -> preparing -> ready | failed
 UPLOAD_RESUMABLE_STATUSES = {"created", "uploading", "uploaded", "failed"}
 
@@ -91,6 +93,24 @@ def patch_state(job_id: str, changes: dict) -> None:
     write_json(state_path, state)
 
 
+def _smart_warning(result: dict, mode: str) -> dict:
+    if mode != "smart":
+        return {"warning_code": None, "warning_message": None}
+    stats = result.get("smart_stats") or {}
+    processed = int(result.get("processed_frames") or 0)
+    with_mask = int(stats.get("frames_with_mask") or 0)
+    if processed <= 0:
+        return {"warning_code": None, "warning_message": None}
+    ratio = with_mask / max(1, processed)
+    if ratio < 0.50:
+        return {
+            "warning_code": "smart_low_detection",
+            "warning_message": "SMART phát hiện phụ đề ở quá ít frame. Hãy thử Smooth/Cover hoặc điều chỉnh vùng chọn.",
+            "mask_ratio": round(ratio, 4),
+        }
+    return {"warning_code": None, "warning_message": None, "mask_ratio": round(ratio, 4)}
+
+
 def process_worker(
     job_id: str,
     *,
@@ -133,22 +153,36 @@ def process_worker(
             mode=mode,
             mask_strength=mask_strength,
             progress_callback=report,
+            job_dir=directory,
         )
 
-        patch_state(job_id, {
+        final = {
             **result,
             "status": "done",
             "progress": 100,
             "message": "Hoàn tất.",
             "completed_at": time.time(),
             "output_path": str(output),
-        })
+        }
+        # Preserve quality warning from pipeline; smart warning fills if absent.
+        if not final.get("warning_code"):
+            final.update(_smart_warning(result, mode))
+        patch_state(job_id, final)
     except Exception as exc:
+        msg = str(exc)
+        code = "processing_failed"
+        for candidate in ("chunk_failed", "concat_failed", "audio_mux_failed",
+                          "processing_no_effect", "invalid_roi", "probe_failed"):
+            if candidate in msg:
+                code = candidate
+                break
         patch_state(job_id, {
             "status": "failed",
             "progress": 0,
             "message": "Xử lý thất bại.",
-            "error": str(exc),
+            "error": msg,
+            "error_code": code,
+            "failed_chunk": getattr(exc, "args", [None])[0] if "chunk" in msg else None,
             "completed_at": time.time(),
         })
     finally:
@@ -601,8 +635,8 @@ def start_process(
     if state.get("status") in {"queued", "processing"}:
         return state
 
-    if mode not in {"fast", "smooth", "smart"}:
-        raise HTTPException(400, "mode phải là fast, smooth, hoặc smart")
+    if mode not in {"fast", "smooth", "smart", "cover"}:
+        raise HTTPException(400, "mode phải là fast, smooth, smart, hoặc cover")
     if thickness < 2 or thickness > int(state["height"]):
         raise HTTPException(400, "Thickness không hợp lệ")
     if feather < 0 or feather > 100:

@@ -573,8 +573,9 @@
 
           <label>Mode
             <select id="mode">
+              <option value="smooth" selected>Smooth</option>
+              <option value="cover">Cover</option>
               <option value="smart">Smart</option>
-              <option value="smooth">Smooth</option>
               <option value="fast">Fast</option>
             </select>
           </label>
@@ -647,7 +648,7 @@
         thickness: 48,
         feather: 8,
         sample_gap: 4,
-        mode: "smart",
+        mode: "smooth",
         mask_strength: 50,
       },
     };
@@ -1215,6 +1216,11 @@
               setStage("result");
               $("resultVideo").src = API_BASE + `/api/jobs/${state.jobId}/result?v=${Date.now()}`;
               $("downloadBtn").href = API_BASE + `/api/jobs/${state.jobId}/download`;
+              if (d.warning_code === "smart_low_detection" || d.warning_message) {
+                showError(d.warning_message || "SMART phát hiện phụ đề ở quá ít frame. Hãy thử Smooth/Cover hoặc điều chỉnh vùng chọn.");
+              } else {
+                showError("");
+              }
               return;
             }
 
@@ -1249,7 +1255,7 @@
       state.scaleY = 1;
       state.p1 = { x: 120, y: 400 };
       state.p2 = { x: 800, y: 400 };
-      state.settings = { thickness: 48, feather: 8, sample_gap: 4, mode: "smart", mask_strength: 50 };
+      state.settings = { thickness: 48, feather: 8, sample_gap: 4, mode: "smooth", mask_strength: 50 };
 
       $("videoInput").value = "";
       $("uploadBtn").disabled = true;
@@ -1269,7 +1275,7 @@
       $("feather").value = 8;
       $("thicknessValue").textContent = "48 px";
       $("featherValue").textContent = "8 px";
-      $("mode").value = "smart";
+      $("mode").value = "smooth";
       if ($("maskStrength")) {
         $("maskStrength").value = 50;
         $("maskStrengthValue").textContent = "50";
